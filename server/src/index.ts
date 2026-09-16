@@ -29,3 +29,14 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
 app.listen(PORT, () => {
   console.log(`Helpdesk API listening on http://localhost:${PORT}`);
 });
+import { escalateBreachedTickets } from './escalation.js';
+setInterval(() => {
+  try {
+    const escalated = escalateBreachedTickets(db);
+    if (escalated.length > 0) {
+      console.log(`Escalated tickets: ${escalated.join(', ')}`);
+    }
+  } catch (error) {
+    console.error('Automatic escalation failed:', error);
+  }
+}, 30_000);

@@ -57,7 +57,7 @@ export interface CreateTicketRequest {
   customerEmail?: string;
   title: string;
   description?: string;
-  priority: 'URGENT' | 'NORMAL';
+  priority: 'URGENT' | 'HIGH' | 'NORMAL';
   assignee?: string | null;
   status?: Status;
 }
@@ -65,7 +65,7 @@ export interface CreateTicketRequest {
 export interface UpdateTicketRequest {
   status?: Status;
   assignee?: string | null;
-  priority?: 'URGENT' | 'NORMAL';
+  priority?: 'URGENT' | 'HIGH' | 'NORMAL';
 }
 
 const DEFAULT_PAGE_SIZE = 20;

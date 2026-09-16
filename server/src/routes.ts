@@ -10,13 +10,14 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { TicketService } from './ticketService.js';
 import { STATUSES, PRIORITIES } from '../../shared/types.js';
+import { escalateBreachedTickets } from './escalation.js';
 
 const createTicketSchema = z.object({
   customerName: z.string().trim().min(1, 'customerName is required'),
   customerEmail: z.string().email().optional().or(z.literal('')).transform((v) => v || undefined),
   title: z.string().trim().min(1, 'title is required'),
   description: z.string().optional(),
-  priority: z.enum(['URGENT', 'NORMAL']),
+  priority: z.enum(['URGENT', 'HIGH', 'NORMAL']),
   assignee: z.string().trim().min(1).optional().nullable(),
   status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']).optional(),
 });
@@ -25,7 +26,7 @@ const updateTicketSchema = z
   .object({
     status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']).optional(),
     assignee: z.string().trim().min(1).optional().nullable(),
-    priority: z.enum(['URGENT', 'NORMAL']).optional(),
+    priority: z.enum(['URGENT', 'HIGH', 'NORMAL']).optional(),
   })
   .refine((data) => Object.keys(data).length > 0, { message: 'No fields to update' });
 
@@ -89,7 +90,12 @@ export function createTicketRouter(service: TicketService): Router {
     res.json(service.listAssignees());
   });
 
-  router.get('/meta', (_req: Request, res: Response) => {
+  router.post('/tickets/escalate', (_req, res) => {
+  const escalated = escalateBreachedTickets((service as any).repo?.db);
+  res.json({ escalated, count: escalated.length });
+});
+
+router.get('/meta', (_req: Request, res: Response) => {
     res.json({ statuses: STATUSES, priorities: PRIORITIES });
   });
 

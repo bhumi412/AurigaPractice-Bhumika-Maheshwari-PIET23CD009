@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   customer_email      TEXT,
   title               TEXT NOT NULL,
   description         TEXT NOT NULL DEFAULT '',
-  priority            TEXT NOT NULL CHECK (priority IN ('URGENT', 'NORMAL')),
+  priority            TEXT NOT NULL CHECK (priority IN ('URGENT', 'HIGH', 'NORMAL')),
   status              TEXT NOT NULL CHECK (status IN ('OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED')),
   assignee            TEXT,
   created_at          TEXT NOT NULL,

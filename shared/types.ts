@@ -5,11 +5,11 @@
  * tests import from here, so there is exactly one definition of what a ticket is.
  */
 
-export type Priority = 'URGENT' | 'NORMAL';
+export type Priority = 'URGENT' | 'HIGH' | 'NORMAL';
 
 export type Status = 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'CLOSED';
 
-export const PRIORITIES: Priority[] = ['URGENT', 'NORMAL'];
+export const PRIORITIES: Priority[] = ['URGENT', 'HIGH', 'NORMAL'];
 
 export const STATUSES: Status[] = ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
 

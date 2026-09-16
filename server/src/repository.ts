@@ -10,6 +10,7 @@
 import Database from 'better-sqlite3';
 import { Ticket, Priority, Status } from '../../shared/types.js';
 import { rowToTicket, TicketRow } from './db.js';
+import { escalateBreachedTickets } from './escalation.js';
 
 export interface TicketFilters {
   status?: Status;
@@ -42,7 +43,7 @@ export interface UpdateTicketInput {
 }
 
 export class TicketRepository {
-  constructor(private db: Database.Database) {}
+  constructor(public db: Database.Database) {}
 
   /**
    * Return tickets matching the given filters. Deliberately returns the FULL
@@ -170,4 +171,10 @@ export class TicketRepository {
     const row = this.db.prepare('SELECT COUNT(*) as c FROM tickets').get() as { c: number };
     return row.c;
   }
+
+  escalateBreachedTickets(now: Date = new Date()): string[] {
+    return escalateBreachedTickets(this.db, now);
+  }
+
+
 }

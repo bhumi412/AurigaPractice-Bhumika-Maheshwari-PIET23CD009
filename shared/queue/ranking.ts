@@ -43,7 +43,8 @@ export const QUEUE_BUCKET = {
 
 const PRIORITY_RANK: Record<Priority, number> = {
   URGENT: 0,
-  NORMAL: 1,
+  HIGH: 1,
+  NORMAL: 2,
 };
 
 export interface TicketRank {

@@ -22,6 +22,7 @@ const HOUR_MS = 60 * 60 * 1000;
  */
 export const SLA_WINDOWS_MS: Record<Priority, number> = {
   URGENT: 2 * HOUR_MS,
+  HIGH: 4 * HOUR_MS,
   NORMAL: 24 * HOUR_MS,
 };
 
