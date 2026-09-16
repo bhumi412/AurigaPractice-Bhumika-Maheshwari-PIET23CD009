@@ -1,735 +1,916 @@
-You are a senior full-stack developer and software architect. I have been given the following problem statement in a coding/technical assessment:
+# Reasoning Behind the Helpdesk Ticket Queue Solution
 
-**Problem: “The Helpdesk is Drowning”**
+## Overview
 
-Priya runs a two-person IT helpdesk and the queue never stops. Some tickets are urgent, such as “my laptop won’t boot before a client demo”; others are normal, such as “can I get a bigger monitor.”
+The goal of this project is to build a reliable IT helpdesk ticket queue where support engineers can quickly identify which ticket needs attention first. The central challenge is that ticket ordering cannot be based only on the ticket's priority. A ticket can become more important when its SLA deadline has been breached, even if it originally had a lower priority.
 
-Each ticket has:
+The solution therefore combines ticket priority, SLA state, ticket status, filtering, searching, and pagination into one consistent queueing system.
 
-* A priority
-* An agreed response time / SLA
-* An assigned person
-* Customer information
-* Ticket status
+The application is implemented as a full-stack TypeScript application with a React frontend, an Express backend, and SQLite for persistent storage. The backend contains the main business logic so that queue behavior remains consistent regardless of which client consumes the API.
 
-Urgent tickets must receive a response within 2 hours, while normal tickets must receive a response within 1 day.
+The design also includes an escalation mechanism. When an active ticket breaches its agreed response deadline, its priority can be increased by exactly one level. The escalation is intentionally incremental:
 
-Priya wants to **always pick the most pressing ticket next**. Any ticket that has passed its promised response time must automatically jump to the front.
+NORMAL → HIGH → URGENT
 
-She frequently needs to answer:
+This prevents a ticket from jumping directly from NORMAL to URGENT in a single escalation run.
 
-1. What tickets are overdue?
-2. What tickets are assigned to me?
-3. Find a specific customer's ticket by name.
-4. Browse a large ticket list using pagination.
+---
 
-The key requirement is:
+## Problem Understanding
 
-> **The ordering rule is the heart of the application. The right ticket should always appear at the top.**
+A helpdesk system normally receives tickets from many customers at different times. Each ticket may have a different priority and response expectation. If tickets are displayed only in creation order, an old urgent issue could appear below a recently created normal issue. Similarly, if pagination is applied before ranking, an important ticket may exist on another page and never appear near the top of the queue.
 
-The application should be generic enough to work for any IT helpdesk, not specifically hard-coded for Priya.
+The most important requirement was therefore to make the queue reflect the actual urgency of the complete filtered ticket set.
 
-### YOUR TASK
+The key design principle is:
 
-Build the best practical solution for this problem.
+FILTER → RANK → PAGINATE
 
-Do NOT start coding immediately.
+This ordering is important.
 
-First analyze the requirements and explain your proposed solution briefly. Then implement it.
+Filtering determines which tickets are relevant to the current user or view. Ranking then determines which of those relevant tickets should be handled first. Pagination is performed only after ranking so that the first page always contains the highest-ranked tickets from the complete filtered result.
 
-### CORE BUSINESS LOGIC
+This avoids an incorrect implementation such as:
 
-Design a clear and reliable ticket-ranking algorithm.
+FILTER → PAGINATE → RANK
 
-The queue must prioritize tickets based on urgency and SLA.
+because ranking only a single page could hide a more urgent ticket that exists on another page.
 
-At minimum, the ordering should account for:
+---
 
-1. **Overdue status**
+## Priority Model
 
-   * If the current time is past the ticket's promised response time, it is overdue.
-   * Overdue tickets must jump ahead of non-overdue tickets.
+The original helpdesk model contains urgent and normal tickets. To support progressive escalation, an intermediate HIGH priority was introduced.
 
-2. **Priority**
+The priority hierarchy is:
 
-   * Urgent tickets should be ahead of normal tickets when their SLA state is otherwise comparable.
+URGENT > HIGH > NORMAL
 
-3. **SLA deadline**
+Internally, the ranking logic assigns a numeric rank to each priority so that the queue can compare tickets consistently.
 
-   * Among tickets with the same urgency/priority category, the ticket whose response deadline is sooner should appear first.
+URGENT receives the highest priority rank, followed by HIGH, followed by NORMAL.
 
-4. **Stable ordering**
+The priority model is represented centrally in the shared TypeScript types. Keeping the priority definition in shared code prevents the frontend and backend from using different allowed values.
 
-   * If two tickets have the same ranking values, use a deterministic tie-breaker such as ticket creation time or ticket ID.
+The application therefore treats the following values as valid priorities:
 
-The ranking should be deterministic and easy to explain.
+- URGENT
+- HIGH
+- NORMAL
 
-For example, conceptually:
+This shared representation also makes TypeScript catch missing cases when the priority model changes.
 
-OVERDUE → PRIORITY → EARLIEST DEADLINE → CREATION TIME
+---
 
-However, don't blindly assume this exact ordering if a better interpretation is appropriate. Explain your final ranking rule before implementing it.
+## SLA Design
 
-### IMPORTANT
+Every ticket has an SLA deadline that represents the agreed response deadline.
 
-Do NOT simply sort by priority.
+The configured SLA windows are:
 
-The application must correctly handle cases such as:
+- URGENT: 2 hours
+- HIGH: 4 hours
+- NORMAL: 24 hours
 
-* Normal ticket that is already overdue
-* Urgent ticket that is not overdue
-* Two overdue tickets with different priorities
-* Two tickets with the same priority but different deadlines
-* Tickets created at different times
-* Tickets whose deadlines are approaching
-* Resolved/closed tickets
+The deadline is calculated from the ticket creation time and the priority at the time the ticket is created.
 
-The "right ticket on top" behavior should remain correct as time passes.
+The important design decision is that automatic escalation does not reset the original SLA deadline.
 
-### REQUIRED FEATURES
+For example, suppose a NORMAL ticket is created with a deadline of 10:00 AM. If the ticket is still unresolved after 10:00 AM, the escalation mechanism may change its priority from NORMAL to HIGH. The ticket still retains its original 10:00 AM SLA deadline.
 
-Build a functional helpdesk ticket management application with:
+This is intentional because changing the priority should not make the original response commitment disappear. The system should remember that the ticket has already breached its original SLA.
 
-#### 1. Ticket List / Queue
+Therefore, escalation changes the urgency of the ticket without rewriting its historical SLA deadline.
 
-Display tickets in the calculated queue order.
+---
 
-Each ticket should show useful information such as:
+## Detecting an Overdue Ticket
 
-* Ticket ID
-* Customer name
-* Issue/title
-* Priority
-* Status
-* Assignee
-* Created time
-* SLA deadline
-* Overdue indicator
+A ticket is considered overdue when its SLA deadline has passed and the ticket is still active.
 
-The highest-ranked ticket should be visually obvious.
+The active states in this application are:
 
-#### 2. Create Ticket
+- OPEN
+- IN_PROGRESS
 
-Allow a user to create a ticket with fields such as:
+The terminal states are:
 
-* Customer name
-* Issue/title
-* Description
-* Priority (Urgent/Normal)
-* Assignee
-* Status
+- RESOLVED
+- CLOSED
 
-The SLA deadline should be calculated automatically from priority:
+Resolved and closed tickets should not continue to generate escalation events because they no longer require an active response.
 
-* Urgent → 2 hours
-* Normal → 24 hours
+The overdue condition is based on the current time compared with the stored SLA deadline.
 
-Avoid asking the user to manually enter the SLA deadline unless there is a strong reason.
-
-#### 3. Overdue Filter
-
-Provide an "Overdue" filter that shows only tickets whose SLA deadline has passed and are still unresolved.
-
-#### 4. "Assigned to Me" Filter
-
-Allow filtering tickets by assignee.
-
-For example:
-
-* All
-* Assigned to me
-* Unassigned
-* Specific team member
-
-#### 5. Customer Search
-
-Allow searching for a ticket by customer name.
-
-The search should work efficiently and support partial customer names if practical.
-
-#### 6. Status Filtering
-
-Support useful statuses such as:
-
-* Open
-* In Progress
-* Resolved
-* Closed
-
-Resolved/closed tickets should not compete with active tickets in the main priority queue.
-
-#### 7. Pagination
-
-The ticket list may contain thousands of tickets.
-
-Implement pagination rather than loading/displaying everything at once.
-
-Show:
-
-* Current page
-* Page size
-* Next/Previous controls
-* Total results if practical
-
-Filtering, searching, sorting and pagination should work together correctly.
-
-### UI REQUIREMENTS
-
-Create a clean, professional helpdesk dashboard.
-
-Prioritize usability over flashy design.
-
-The UI should make it immediately clear:
-
-* Which ticket needs attention first
-* Which tickets are overdue
-* Who is assigned to each ticket
-* How much time remains before SLA breach
-
-Use clear visual indicators for:
-
-* Overdue
-* Urgent
-* Normal
-* Resolved
-
-The most urgent ticket should be visually prominent without making the interface cluttered.
-
-### TECHNICAL REQUIREMENTS
-
-Choose a practical technology stack suitable for a coding assessment.
-
-Before implementation, state:
-
-* Frontend technology
-* Backend technology
-* Database/storage choice
-* Important libraries
-* Why you selected them
-
-Keep the architecture simple enough to build and explain during an interview.
-
-Avoid unnecessary microservices or complicated infrastructure.
-
-### DATA MODEL
-
-Create a sensible Ticket model.
-
-At minimum it should contain:
-
-* id
-* customerName
-* title
-* description
-* priority
-* status
-* assignee
-* createdAt
-* slaDeadline
-* resolvedAt (if applicable)
-
-You may add fields if they improve the solution.
-
-### QUEUE ALGORITHM
-
-Implement the queue-ranking logic as a separate, reusable function/module.
-
-For example:
-
-getTicketRank(ticket, currentTime)
-
-or
-
-sortTicketsByUrgency(tickets)
-
-The ranking logic must NOT be scattered throughout the UI.
-
-This is extremely important because the ordering rule is the core of the application.
-
-Explain the algorithm's:
-
-* Time complexity
-* Space complexity
-* Edge cases
-* Why it correctly represents the SLA requirement
-
-### TIME HANDLING
-
-Do not hard-code "overdue" based on a value that is calculated only when the ticket is created.
-
-Overdue status depends on the current time.
-
-The system should dynamically determine:
+Conceptually:
 
 current time > SLA deadline
 
-for active tickets.
+If the deadline has not been reached, the ticket remains within SLA.
 
-Make the implementation easy to test.
+If the deadline has passed and the ticket is active, it becomes eligible for escalation.
 
-### SAMPLE DATA
+---
 
-Create realistic seed/mock data containing cases such as:
+## Queue Ranking Logic
 
-* Urgent ticket with 1 hour remaining
-* Urgent ticket overdue by 30 minutes
-* Normal ticket with 5 hours remaining
-* Normal ticket overdue by 2 hours
-* Multiple tickets with identical priorities
-* Multiple tickets with different deadlines
-* Resolved ticket
-* Unassigned ticket
-* Multiple tickets belonging to the same customer
+The queue ranking is intentionally separated from the API and UI code.
 
-This should allow me to demonstrate that the ordering algorithm actually works.
+The ranking logic is implemented in a dedicated shared queue module so that the same ordering rules can be reused wherever tickets need to be ranked.
 
-### TESTING
+The first major distinction is whether an active ticket is overdue.
 
-Add tests for the most important queue scenarios.
+An overdue active ticket is more pressing than an active ticket that is still within its SLA.
 
-At minimum test:
+The general ranking structure is:
 
-1. Overdue ticket comes before non-overdue ticket.
-2. Earlier SLA deadline comes before later deadline when other ranking factors are equal.
-3. Urgent and normal tickets are ordered correctly.
-4. Resolved/closed tickets do not appear ahead of active tickets.
-5. Ties are deterministic.
-6. Filtering by assignee works.
-7. Customer search works.
-8. Pagination works.
-9. Queue order changes correctly when time passes and a ticket becomes overdue.
+Overdue active tickets
 
-### CODE QUALITY
+then
 
-Write clean, readable, beginner-friendly code.
+Active tickets within SLA
 
-Use meaningful variable/function names.
+then
 
-Avoid unnecessary abstraction.
+Resolved and closed tickets
 
-Keep business logic separate from UI code.
+Priority is then used to order tickets within the relevant groups.
 
-Add comments only where they explain important logic.
+This means an overdue NORMAL ticket can become more important than an on-time URGENT ticket depending on the exact ranking rules and ticket state. The key idea is that SLA breach is treated as an important urgency signal rather than ignoring the deadline entirely.
 
-Do not generate a huge amount of unnecessary code.
+The ranking function also considers deterministic tie-breaking so that tickets with otherwise equal urgency do not randomly change positions between requests.
 
-### ASSESSMENT-FRIENDLY APPROACH
+Keeping the ranking logic deterministic makes the queue easier to reason about, test, and debug.
 
-I may need to explain this project to an interviewer.
+---
 
-Therefore, after implementation, provide:
+## Why Ranking Is Shared
 
-1. Project architecture
-2. Folder structure
-3. Explanation of the ticket ranking algorithm
-4. Explanation of why overdue tickets jump to the front
-5. Explanation of SLA calculation
-6. Database schema
-7. API endpoints, if a backend is used
-8. Important technical decisions
-9. Time and space complexity
-10. Edge cases
-11. Testing strategy
-12. How to run the project
-13. 5–10 likely interviewer questions with simple answers
+The ranking function is not embedded directly inside an Express route or React component.
 
-### IMPORTANT DEVELOPMENT RULE
+This was a deliberate architectural choice.
 
-Work step-by-step.
+If ranking were implemented separately in the frontend and backend, the two implementations could eventually disagree. For example, the frontend could place HIGH above NORMAL while the backend returns a different order.
 
-First:
+A shared ranking module provides one source of truth.
 
-1. Analyze the problem.
-2. Define the ranking/ordering rule.
-3. Propose the architecture and tech stack.
-4. Define the data model.
-5. Show the folder structure.
+The backend uses the ranking logic to return correctly ordered data, while the frontend is responsible only for displaying the result.
 
-Then wait for my confirmation before generating the complete implementation.
+This keeps business rules out of the presentation layer.
 
-When I say **"continue"**, implement the project incrementally, starting with the backend/data model and core queue-ranking logic before building filters and UI.
+---
 
-Do not skip the core ordering logic.
+## Filtering, Ranking, and Pagination
 
-The primary goal is:
+The queue pipeline is one of the most important parts of the implementation.
 
-> **Build a generic helpdesk system where the correct ticket is always at the top of the queue, especially when an SLA has been breached.**
-Continue.
-Use these decisions:
+The system follows:
 
-* Ranking: use the plain 4-key rule. Do NOT add the "<20% remaining" at-risk bucket.
-* Scope: build the full Express + SQLite application, but keep the architecture simple and assessment-friendly.
-* Keep the ranking logic independent and reusable so it can be tested separately.
-* Do not spend time on unnecessary features, authentication, microservices, or complex styling.
+FILTER → RANK → PAGINATE
 
-Start implementation now.
-Build order
-
-1. Shared types/models
-2. SLA calculation module
-3. `ranking.ts` with the core ticket ordering algorithm
-4. Comprehensive tests for ranking/SLA
-5. SQLite database/repository
-6. Express API
-7. Frontend/dashboard
-8. Filters, customer search, assignment and pagination
-9. Seed realistic sample data
-10. Final cleanup and README
-
-Core ranking requirement
-For ACTIVE tickets, order by:
-
-1. Overdue tickets first
-2. Priority: Urgent before Normal
-3. Earliest SLA deadline
-4. Earliest creation time / deterministic ticket ID tie-breaker
-
-Resolved/Closed tickets must not compete with active tickets in the main queue.
-Overdue must be calculated dynamically from the current time:
-`currentTime > slaDeadline`
-SLA:
-
-* Urgent = createdAt + 2 hours
-* Normal = createdAt + 24 hours
-
-Keep this logic in a dedicated module. Do not duplicate ranking logic in the frontend or API.
-Tests must cover
-
-* overdue vs non-overdue
-* urgent vs normal
-* earlier vs later SLA deadline
-* deterministic ties
-* resolved/closed tickets
-* ticket becoming overdue as time passes
-* SLA calculation
-* filtering by assignee
-* customer-name search
-* pagination
+Filtering can include conditions such as:
 
-Important
-Make the project actually runnable, not pseudo-code.
-Use TypeScript if practical.
-Keep the code beginner-friendly because I need to explain it in an interview.
-After each major implementation step, briefly tell me:
-
-* what was created
-* why it was created
-* how it satisfies the requirement
-
-Do NOT restart the analysis or ask me the two questions again. The decisions above are final.
-Begin with the shared types, SLA module, `ranking.ts`, and its tests.
-CONTINUE AND COMPLETE THE ENTIRE PROJECT NOW.
-
-This is my final implementation pass, so do not stop after step 5 or step 6, do not ask me for confirmation, and do not give me another planning phase.
-
-You already completed steps 1–4:
-
-* shared types
-* SLA module
-* `ranking.ts`
-* ranking/SLA tests
-
-The ranking decision is FINAL:
-
-* Active overdue tickets first
-* Then Urgent before Normal
-* Then earliest SLA deadline
-* Then earliest creation time
-* Then deterministic ticket ID
-* No "<20% remaining" at-risk bucket
-* Resolved/Closed tickets must not compete with active tickets in the main queue
-* IDs are zero-padded such as `TKT-0042`, so `localeCompare` is an acceptable deterministic final tie-breaker.
-
-Now COMPLETE the remaining application end-to-end.
-
-### REQUIRED BUILD
-
-#### Step 5 — SQLite
-
-Implement:
-
-* SQLite database
-* Ticket schema
-* Repository/data-access layer
-* Seed/sample data
-* Proper indexes where useful
-
-Ticket fields should include:
-
-* id
-* customerName
-* title
-* description
-* priority
-* status
-* assignee
-* createdAt
-* slaDeadline
-* resolvedAt
-
-Keep the repository behind a clean service/interface so the ranking logic remains independent of SQLite.
-
-#### Step 6 — Express API
-
-Implement the backend API for:
-
-* GET `/api/tickets`
-* GET `/api/tickets/:id`
-* POST `/api/tickets`
-* PATCH `/api/tickets/:id`
-* DELETE `/api/tickets/:id` if appropriate
-
-The GET ticket-list endpoint must support:
-
-* customer search
-* assignee filter
-* status filter
-* overdue filter
-* pagination
-
-IMPORTANT PIPELINE:
-
-FILTER → DETERMINE OVERDUE/RANK → SORT → PAGINATE
-
-Do not paginate before ranking, because that could produce an incorrect queue.
-
-Return useful pagination metadata such as:
-
-* items
-* page
-* pageSize
-* total
-* totalPages
-
-#### Step 7 — Frontend
-
-Build a clean professional helpdesk dashboard.
-
-It must show:
-
-* Ticket ID
-* Customer
-* Issue
-* Priority
-* Status
-* Assignee
-* SLA deadline
-* Overdue indicator
-
-Make the highest-priority ticket visually obvious.
-
-Include:
-
-* All tickets
-* Overdue filter
-* Assigned-to-me filter
-* Assignee filter
-* Status filter
-* Customer search
-* Pagination
-* Create ticket form
-* Ticket update/assignment capability
-
-The UI should be practical and assessment-friendly, not overly complicated.
-
-#### Step 8 — Real-time SLA behavior
-
-Make sure overdue status is based on the current time, not permanently stored as a static boolean.
-
-If practical, refresh/recalculate the displayed queue periodically so a ticket can automatically become overdue while the application is open.
-
-Do not introduce unnecessary real-time infrastructure such as WebSockets unless genuinely required.
-
-#### Step 9 — Seed data
-
-Create enough realistic sample tickets to demonstrate:
-
-* overdue urgent
-* overdue normal
-* urgent approaching deadline
-* normal approaching deadline
-* different assignees
-* unassigned ticket
-* same customer with multiple tickets
-* resolved ticket
-* closed ticket
-* tie cases
-
-The first few displayed tickets should clearly demonstrate that the ranking algorithm works.
-
-#### Step 10 — Tests
-
-Run the complete test suite.
-
-Fix any failing tests or TypeScript/build errors.
-
-Test at least:
-
-1. SLA calculation
-2. overdue detection
-3. urgent vs normal
-4. overdue vs non-overdue
-5. earliest deadline
-6. creation-time tie-break
-7. ticket-ID tie-break
-8. resolved/closed behavior
-9. filters
-10. search
-11. pagination
-12. API behavior
-
-Do not merely say tests should pass. ACTUALLY RUN THEM if the environment allows it.
-
-Also run the TypeScript/build checks.
-
-### IMPORTANT ARCHITECTURE RULE
-
-Keep responsibilities separated:
-
-* `ranking.ts` → only queue ranking/business logic
-* SLA module → SLA calculation/time logic
-* repository → SQLite/data access
-* service/API → application/business orchestration
-* frontend → presentation and user interaction
-
-Do not duplicate the ranking algorithm in multiple places.
-
-### IMPORTANT PERFORMANCE RULE
-
-For the large-ticket-list requirement, make reasonable use of database filtering/search and pagination.
-
-However, because queue ranking is the heart of the assignment, make sure the implementation still guarantees the correct global queue order.
-
-If database-side sorting can safely reproduce the exact ranking, use it. Otherwise, clearly isolate the ranking step and explain the trade-off.
-
-### FINAL QUALITY CHECK
-
-Before finishing:
-
-1. Inspect the project structure.
-2. Check for TypeScript errors.
-3. Run tests.
-4. Run/build the frontend.
-5. Fix any errors you find.
-6. Verify API routes.
-7. Verify filters + ranking + pagination together.
-8. Verify creating a ticket calculates the correct SLA.
-9. Verify an overdue ticket moves to the front.
-10. Verify the UI starts successfully.
-
-Do not leave TODOs, placeholder implementations, pseudo-code, fake API calls, or unfinished features.
-
-### FINAL RESPONSE TO ME
-
-After implementation, give me a concise final report containing:
-
-* What was built
-* Final folder structure
-* Tech stack
-* Queue-ranking rule
-* Filter → rank → paginate flow
-* API endpoints
-* Database schema
-* Tests/results
-* Exact commands to install/run/test the project
-* Any important limitations
-
-Most importantly:
-
-**FINISH THE WORKING PROJECT, NOT JUST THE EXPLANATION.**
-The project is NOT complete in my workspace.
-
-I currently only have these files:
-README.md
-ranking.ts
-sla.ts
-ticketService.ts
-routes.ts
-App.tsx
-
-There is NO client/ directory and NO server/ directory.
-
-When I run:
-npm run seed
-
-I get:
-Cannot find module '/workspaces/.../server/src/seed.ts'
-
-And:
-cd client
-returns:
-No such file or directory.
-
-Your previous report claimed the complete Express + SQLite + React project was built, but the actual workspace/files do not contain the required project structure.
-
-IMPORTANT: Do not just explain the issue.
-
-FIX THE PROJECT NOW.
-
-Create the complete runnable project in the current workspace with this structure (or an equally clean structure):
-
-helpdesk/
-├── client/
-│   ├── package.json
-│   ├── src/
-│   │   ├── App.tsx
-│   │   └── ...
-│   └── ...
-├── server/
-│   ├── src/
-│   │   ├── seed.ts
-│   │   ├── app.ts
-│   │   ├── routes.ts
-│   │   ├── ...
-│   │   └── ...
-├── shared/
-│   ├── types.ts
-│   ├── ranking.ts
-│   └── sla.ts
-├── package.json
-├── README.md
-└── ...
-
-Requirements:
-- Express + TypeScript backend
-- SQLite using better-sqlite3
-- React + TypeScript + Vite + Tailwind frontend
-- Zod validation
-- Vitest tests
-- Working seed command
-- Working backend dev command
-- Working frontend dev command
-- The shared ranking module must be used by the backend
-- Dynamic overdue calculation: now > slaDeadline
-- Ranking:
-  overdue → active → closed
-  then urgent → normal
-  then earliest SLA deadline
-  then creation time
-  then ticket ID
-- Filters: overdue, assignee, status
+- Priority
+- Status
+- Overdue state
+- Assigned-to-me
 - Customer search
-- Assignment
+
+The filters are applied first because the user should only rank tickets relevant to the current query.
+
+After filtering, the complete result set is ranked.
+
+Only after ranking is pagination applied.
+
+For example, if there are 54 matching tickets and the page size is 20, the system first determines the correct order of all 54 tickets. It then returns the first 20 tickets for page one.
+
+This guarantees that page one represents the top of the actual queue rather than the top of an arbitrary subset.
+
+---
+
+## Customer Search
+
+Customer search is designed to be case-insensitive.
+
+The database stores a normalized customer name value so that searches do not need to depend on the exact capitalization used when the ticket was created.
+
+For example, a search for:
+
+rahul
+
+can match:
+
+Rahul Sharma
+
+RAHUL SHARMA
+
+rahul sharma
+
+This improves usability while keeping the search implementation simple.
+
+---
+
+## Assigned-to-Me Filtering
+
+Helpdesk systems are often used by multiple support engineers. A support engineer should be able to focus on the tickets assigned to them rather than reviewing the entire queue.
+
+The assigned-to-me filter therefore restricts the ticket set to the current assignee.
+
+This filter is applied before ranking so that the engineer receives a properly prioritized queue of only their assigned work.
+
+The same FILTER → RANK → PAGINATE pipeline is preserved.
+
+---
+
+## Pagination Design
+
+Pagination is implemented at the API level so that the backend can control the amount of data returned to the client.
+
+The API provides information such as:
+
+- Current page
+- Page size
+- Total matching tickets
+- Total number of pages
+
+For example:
+
+{
+  "page": 1,
+  "pageSize": 20,
+  "total": 54,
+  "totalPages": 3
+}
+
+This allows the frontend to display pagination controls without having to independently calculate the total number of matching records.
+
+More importantly, pagination is performed after ranking, which preserves the intended queue semantics.
+
+---
+
+# Automated Escalation Reasoning
+
+The escalation mechanism was introduced to handle tickets that remain unresolved beyond their agreed response deadline.
+
+The escalation chain is:
+
+NORMAL → HIGH → URGENT
+
+The most important constraint is that only one level can be increased during a single escalation run.
+
+For example:
+
+NORMAL → HIGH
+
+is valid during one run.
+
+The following is not allowed in one run:
+
+NORMAL → URGENT
+
+Similarly:
+
+HIGH → URGENT
+
+is valid, but only one level is increased.
+
+This design prevents an overdue ticket from immediately skipping the intermediate priority.
+
+---
+
+## Why Escalation Is Incremental
+
+Incremental escalation provides a predictable progression of urgency.
+
+If a ticket becomes overdue, the first escalation communicates that the ticket needs more attention by moving it from NORMAL to HIGH.
+
+If it remains overdue during a later run, it can move from HIGH to URGENT.
+
+This makes the escalation state easier to understand and gives the system a clear progression:
+
+Normal urgency
+
+→ increased urgency
+
+→ maximum urgency
+
+The escalation function therefore maps each priority to its next priority:
+
+NORMAL → HIGH
+
+HIGH → URGENT
+
+URGENT → URGENT
+
+The final mapping means that URGENT tickets remain URGENT even if they are overdue.
+
+---
+
+## Why URGENT Does Not Escalate Further
+
+URGENT is already the highest supported priority.
+
+There is no higher priority value in the current model, so an overdue URGENT ticket remains URGENT.
+
+The escalation function explicitly handles this case rather than attempting to create another priority level.
+
+This also prevents repeated escalation runs from modifying an already maximum-priority ticket unnecessarily.
+
+---
+
+## Resolved and Closed Tickets
+
+The escalation process explicitly excludes RESOLVED and CLOSED tickets.
+
+This is important because a resolved ticket may have an old SLA deadline in the database, but it no longer represents active work.
+
+If the escalation process ignored ticket status, an old resolved ticket could be repeatedly considered overdue and unnecessarily modified.
+
+The query therefore considers only tickets whose status is not RESOLVED or CLOSED.
+
+This keeps escalation focused on active support work.
+
+---
+
+## Persistence of Escalation
+
+Escalation is not implemented as a temporary value in memory.
+
+When a ticket is escalated, the new priority is written to SQLite.
+
+For example:
+
+NORMAL
+
+becomes:
+
+HIGH
+
+and the database stores HIGH as the ticket's current priority.
+
+This means the escalation remains after:
+
+- Refreshing the application
+- Restarting the backend
+- Re-fetching the ticket
+- Loading the ticket from another API request
+
+Persistence is important because an automated escalation system should not lose its state when the server restarts.
+
+---
+
+## Preserving the Original SLA Deadline
+
+A particularly important design decision is that the escalation operation updates the priority only.
+
+It does not calculate a new SLA deadline.
+
+For example:
+
+Original ticket:
+
+Priority = NORMAL
+
+SLA deadline = 10:00 AM
+
+After breach:
+
+Priority = HIGH
+
+SLA deadline = 10:00 AM
+
+The deadline remains unchanged.
+
+This preserves the original SLA commitment and prevents the system from accidentally extending the deadline simply because the ticket became more urgent.
+
+The escalation module therefore performs a targeted database update rather than re-running the normal priority-update logic.
+
+---
+
+## Dedicated Escalation Module
+
+Escalation is implemented in a dedicated module rather than being mixed into the general ticket ranking function.
+
+This separation is useful because ranking and escalation have different responsibilities.
+
+Ranking answers:
+
+"Which ticket should appear first right now?"
+
+Escalation answers:
+
+"Which overdue active tickets should have their stored priority increased?"
+
+Keeping these responsibilities separate makes both pieces easier to test.
+
+It also prevents the queue-ranking function from unexpectedly modifying database state.
+
+The ranking function is primarily concerned with ordering.
+
+The escalation function is responsible for a controlled state change.
+
+---
+
+# Repository and Service Separation
+
+The backend follows a layered structure.
+
+The repository is responsible for database interaction.
+
+The service layer is responsible for application-level ticket behavior.
+
+The routes are responsible for HTTP communication.
+
+This separation keeps the API layer from containing large amounts of database logic.
+
+A typical request flow is:
+
+HTTP Request
+
+→ Express Route
+
+→ Ticket Service
+
+→ Ticket Repository
+
+→ SQLite
+
+The escalation mechanism follows the same general architecture while keeping the escalation-specific logic in its dedicated module.
+
+---
+
+## Repository Layer
+
+The repository encapsulates SQLite operations.
+
+Instead of allowing route handlers to construct SQL queries directly, database access is concentrated in the repository.
+
+This makes the database interaction easier to maintain and reduces duplication.
+
+The repository also converts database rows into the application's ticket representation.
+
+---
+
+## Service Layer
+
+The service layer contains ticket-related business logic.
+
+Examples include:
+
+- Creating tickets
+- Updating tickets
+- Calculating SLA information
+- Applying ticket-level business rules
+- Returning tickets in the required queue order
+
+Keeping this logic outside Express routes makes the application easier to test without requiring an HTTP request for every business-rule test.
+
+---
+
+## API Layer
+
+Express routes expose the application's functionality through HTTP endpoints.
+
+Examples include:
+
+GET /api/tickets
+
+GET /api/tickets/:id
+
+POST /api/tickets
+
+PATCH /api/tickets/:id
+
+POST /api/tickets/escalate
+
+The API layer validates incoming request data and delegates the actual business work to the appropriate backend components.
+
+---
+
+# Input Validation
+
+Zod is used for API input validation.
+
+This prevents invalid values from entering the application's business logic.
+
+For example, the priority field accepts only:
+
+URGENT
+
+HIGH
+
+NORMAL
+
+Similarly, the status field is restricted to the supported ticket states.
+
+This is preferable to relying only on frontend validation because API clients can send requests without using the React interface.
+
+Backend validation therefore provides a second and more reliable boundary.
+
+---
+
+# SQLite Database Choice
+
+SQLite was selected because the application is a relatively lightweight helpdesk system and does not require a separate database server for local development.
+
+SQLite provides:
+
+- Persistent storage
+- SQL support
+- Transactions
+- Simple local setup
+- Minimal infrastructure requirements
+
+The application uses better-sqlite3 to communicate with SQLite from Node.js.
+
+The database also uses a WAL configuration, which is useful for SQLite applications that may have concurrent read and write activity.
+
+---
+
+# Transactional Escalation
+
+The escalation operation is performed inside a database transaction.
+
+This is useful because one escalation run may update multiple tickets.
+
+A transaction ensures that the database operation is treated as a single logical operation.
+
+The process is conceptually:
+
+Find overdue active tickets
+
+→ Determine the next priority for each ticket
+
+→ Update eligible tickets
+
+→ Complete the transaction
+
+If the operation fails during the transaction, SQLite can roll back the changes instead of leaving a partially completed escalation run.
+
+This is an important reliability property for an automated background operation.
+
+---
+
+# Automatic Execution
+
+The escalation mechanism is designed to run periodically rather than requiring a support engineer to manually inspect every ticket.
+
+The backend can invoke the escalation function on an interval.
+
+Each execution checks the current database state for overdue active tickets.
+
+Because escalation is based on the stored priority and current SLA deadline, repeated runs are safe:
+
+NORMAL can become HIGH
+
+HIGH can become URGENT
+
+URGENT remains URGENT
+
+Resolved and closed tickets remain unchanged.
+
+The database therefore acts as the source of truth for the current escalation state.
+
+A manual escalation API endpoint is also useful because it allows the behavior to be triggered explicitly during development, testing, or operational debugging.
+
+---
+
+# Why Automatic Escalation Is Separate From Ranking
+
+It may initially seem possible to simply display overdue NORMAL tickets as HIGH or URGENT without changing the database.
+
+However, that would not satisfy the requirement that escalation persists.
+
+A display-only approach would create a temporary calculated priority while the stored ticket remained NORMAL.
+
+That would cause inconsistencies between different requests and clients.
+
+For example, one component might display the ticket as URGENT while another API consumer still sees NORMAL.
+
+The chosen approach changes the stored priority when the escalation condition is met.
+
+This makes the ticket's new priority part of the persistent application state.
+
+---
+
+# Frontend Architecture
+
+The frontend is implemented using React and TypeScript.
+
+React is responsible for displaying:
+
+- Ticket lists
+- Ticket details
+- Priority information
+- Status information
+- Filters
+- Search controls
 - Pagination
-- Create/update/delete tickets
-- SLA: urgent = 2 hours, normal = 24 hours
-- Seed realistic tickets
-- Tests for ranking, SLA, repository/service, filters and pagination
+- Ticket actions
 
-Most importantly, ACTUALLY CREATE ALL MISSING FILES in the current workspace.
+The frontend does not contain the authoritative queue-ranking algorithm.
 
-After creating them, run:
-npm install
-npm run seed
-npm test
-npm run build (or the appropriate TypeScript/Vite build commands)
+Instead, it consumes the backend's ordered ticket results.
 
-Fix all errors you encounter.
+This keeps business rules centralized and prevents duplicate implementations.
 
-Do not stop after giving me code snippets. Make the files exist in the workspace and verify the project runs.
+---
 
-At the end, show me the exact commands I should run in GitHub Codespaces to start:
-1. backend
-2. frontend
+# Why TypeScript Is Used
 
-Do not ask me to make architectural decisions. Use sensible defaults and complete the project.
+TypeScript is used throughout the application because the system contains several related domain types.
+
+For example, a ticket contains:
+
+- id
+- customer
+- title
+- priority
+- status
+- assignee
+- timestamps
+- SLA information
+
+Using TypeScript makes it possible to represent these structures explicitly.
+
+The shared types also allow the frontend and backend to use the same definitions.
+
+When HIGH was introduced as a new priority, TypeScript helped identify places where the old URGENT/NORMAL model was incomplete.
+
+This made the priority change safer and reduced the chance of silently missing a case.
+
+---
+
+# Testing Strategy
+
+Testing focuses on the most important business rules rather than only checking whether the server starts.
+
+The project uses Vitest.
+
+Important areas of behavior include:
+
+- Ticket creation
+- Ticket updates
+- SLA calculation
+- Overdue detection
+- Queue ranking
+- Filtering
+- Pagination
+- Priority handling
+- Escalation
+
+The escalation logic is especially important because it contains several edge cases.
+
+The expected behavior includes:
+
+NORMAL overdue → HIGH
+
+HIGH overdue → URGENT
+
+URGENT overdue → URGENT
+
+RESOLVED overdue → no escalation
+
+CLOSED overdue → no escalation
+
+Non-overdue active ticket → no escalation
+
+These cases verify that the escalation mechanism follows the intended state transitions.
+
+---
+
+# Handling Edge Cases
+
+Several edge cases were considered during implementation.
+
+## Already URGENT
+
+An already URGENT ticket cannot move to a higher priority, so it remains URGENT.
+
+## Resolved Ticket
+
+A resolved ticket may have an SLA deadline in the past, but it should not escalate because the work has been completed.
+
+## Closed Ticket
+
+A closed ticket is also excluded from escalation.
+
+## Not Yet Overdue
+
+A ticket whose SLA deadline has not passed should not be escalated.
+
+## Repeated Escalation Runs
+
+Repeated runs should increase a ticket by only one level at a time.
+
+For example:
+
+First run:
+
+NORMAL → HIGH
+
+Second run:
+
+HIGH → URGENT
+
+Third run:
+
+URGENT → URGENT
+
+This makes repeated execution predictable.
+
+## Empty Result
+
+If there are no overdue active tickets, the escalation function returns an empty list and does not modify the database.
+
+---
+
+# Error Handling and Validation
+
+The backend validates request payloads before processing them.
+
+Invalid priority values, invalid statuses, or malformed input should not be allowed to reach the database layer.
+
+Database constraints also provide an additional level of protection.
+
+The SQLite schema restricts priority and status values so that invalid states cannot easily be persisted.
+
+This creates multiple validation boundaries:
+
+Client validation
+
+→ API validation
+
+→ Application logic
+
+→ Database constraints
+
+---
+
+# Performance Considerations
+
+The application is designed for a moderate-sized helpdesk dataset.
+
+SQLite provides sufficient performance for a local or small-scale application, while indexes are used for frequently searched or filtered ticket fields.
+
+The database also stores a normalized customer-name value to make case-insensitive customer search easier.
+
+Pagination prevents the frontend from receiving unnecessarily large result sets.
+
+The queue pipeline also keeps the conceptual responsibilities clear:
+
+FILTER
+
+then
+
+RANK
+
+then
+
+PAGINATE
+
+For a much larger production system, ranking and pagination could be moved more heavily into SQL or a dedicated database query strategy. For the current application scale, keeping the queue behavior explicit and testable is more important than prematurely optimizing the implementation.
+
+---
+
+# Maintainability
+
+The project is organized around clear responsibilities.
+
+Shared domain types are stored separately from server-specific code.
+
+SLA calculations are separated into their own module.
+
+Queue ranking is separated into its own module.
+
+Escalation is separated from ranking.
+
+Database operations are handled through the repository.
+
+Business logic is handled by the service layer.
+
+HTTP handling is implemented through Express routes.
+
+This organization makes future changes easier.
+
+For example, if another priority such as CRITICAL were introduced later, the shared priority type, ranking map, escalation rules, and validation schema could be updated systematically.
+
+---
+
+# Trade-offs
+
+One trade-off in the current design is the use of SQLite instead of a larger database system such as PostgreSQL.
+
+SQLite is easier to set up and is well suited for development and demonstration, but a large production helpdesk system with many concurrent users could eventually require a server-based relational database.
+
+Another trade-off is keeping some queue-ranking behavior in application code rather than implementing the entire ranking operation as a complex SQL query.
+
+Application-level ranking makes the business rule easier to read, understand, and unit test. However, for very large datasets, database-side ordering would likely be more scalable.
+
+The current implementation prioritizes clarity, correctness, and maintainability for the intended project scale.
+
+---
+
+# Security Considerations
+
+The backend does not rely solely on frontend restrictions.
+
+Incoming data is validated on the server.
+
+Database queries use parameterized statements rather than dynamically concatenating user input into SQL.
+
+This reduces the risk of SQL injection through customer search or ticket fields.
+
+The database also enforces valid priority and status values through schema constraints.
+
+For a production deployment, additional authentication, authorization, rate limiting, secure headers, logging, and more detailed access control would be required.
+
+---
+
+# Overall Design Philosophy
+
+The main design philosophy of the project is to keep business rules explicit and predictable.
+
+The queue should always answer:
+
+"What should the support engineer handle first?"
+
+The escalation mechanism should answer:
+
+"Has an active ticket missed its agreed response deadline, and if so, should its priority increase?"
+
+These are related but separate questions.
+
+The queue uses current ticket state to determine ordering.
+
+The escalation mechanism changes ticket state when an SLA breach occurs.
+
+The database persists that state.
+
+The frontend displays the resulting queue.
+
+This separation makes the system easier to understand and prevents UI-specific behavior from becoming the source of truth for business rules.
+
+---
+
+# Final Result
+
+The resulting system provides a complete helpdesk ticket workflow with:
+
+- Persistent ticket storage
+- Priority management
+- SLA deadlines
+- Overdue detection
+- Priority-based queue ordering
+- SLA-aware queue ordering
+- Filtering
+- Customer search
+- Assigned-to-me filtering
+- Pagination
+- Input validation
+- Automated priority escalation
+- Persistent escalation state
+- Manual escalation triggering
+- Unit and integration testing
+- React-based frontend
+- Express-based backend
+- SQLite database
+- Shared TypeScript domain types
+
+The most important architectural decision is the separation between queue ranking and ticket escalation.
+
+Ranking determines the order in which tickets should be presented.
+
+Escalation changes the stored priority of tickets that have breached their SLA.
+
+Together, these mechanisms create a queue that is both responsive to current urgency and capable of progressively escalating unresolved work.
+
+The overall flow can be summarized as:
+
+Ticket Created
+    ↓
+Priority Assigned
+    ↓
+SLA Deadline Calculated
+    ↓
+Ticket Stored in SQLite
+    ↓
+Filters Applied
+    ↓
+Complete Result Set Ranked
+    ↓
+Pagination Applied
+    ↓
+Highest-Priority Tickets Displayed
+    ↓
+SLA Deadline Breached?
+    ↓
+Active Ticket?
+    ↓
+Priority Escalated by One Level
+    ↓
+New Priority Persisted in SQLite
+    ↓
+Queue Re-ranked
+
+This approach provides a clear separation of concerns while satisfying the core helpdesk queue requirements and the automated escalation requirement.
